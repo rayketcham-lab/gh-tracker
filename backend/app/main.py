@@ -38,6 +38,26 @@ def create_app(db: Database | None = None) -> FastAPI:
     async def get_paths(owner: str, repo: str) -> list[dict]:
         return await app.state.db.get_popular_paths(f"{owner}/{repo}")
 
+    @app.get("/api/repos/{owner}/{repo}/summary")
+    async def get_repo_summary(owner: str, repo: str) -> dict:
+        repo_name = f"{owner}/{repo}"
+        traffic = await app.state.db.get_daily_metrics(
+            repo_name, "2000-01-01", "2099-12-31"
+        )
+        referrers = await app.state.db.get_referrers(repo_name)
+        paths = await app.state.db.get_popular_paths(repo_name)
+        total_views = sum(d["views"] for d in traffic)
+        total_uv = sum(d["unique_visitors"] for d in traffic)
+        return {
+            "repo_name": repo_name,
+            "github_url": f"https://github.com/{repo_name}",
+            "traffic": traffic,
+            "referrers": referrers,
+            "paths": paths,
+            "total_views": total_views,
+            "total_unique_visitors": total_uv,
+        }
+
     @app.get("/api/visitors")
     async def get_visitors(repo: str | None = Query(None)) -> list[dict]:
         return await app.state.db.get_daily_visitors(repo)

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Eye, Users, Download, TrendingUp, Calendar, ChevronDown,
-  GitBranch, Activity,
+  GitBranch, Activity, ExternalLink,
 } from 'lucide-react'
 import { fetchRepos, fetchTraffic, fetchReferrers, fetchPaths, parseRepo } from './api'
 import type { TrafficDay } from './api'
@@ -119,6 +119,35 @@ function App() {
             }} />
           </div>
 
+          {activeRepo && (
+            <a
+              href={`https://github.com/${activeRepo}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 10, padding: '8px 14px',
+                color: 'var(--text-secondary)',
+                fontSize: 12, fontWeight: 500,
+                textDecoration: 'none',
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLAnchorElement).style.borderColor = 'rgba(6, 182, 212, 0.4)';
+                (e.currentTarget as HTMLAnchorElement).style.color = '#22d3ee';
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLAnchorElement).style.borderColor = 'var(--border-color)';
+                (e.currentTarget as HTMLAnchorElement).style.color = 'var(--text-secondary)';
+              }}
+            >
+              <ExternalLink size={13} />
+              Open on GitHub
+            </a>
+          )}
+
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,
             background: 'rgba(16, 185, 129, 0.1)',
@@ -172,6 +201,7 @@ function App() {
           <VisitorsTable
             data={visitorSummary}
             loading={visitorsLoading}
+            selectedRepo={activeRepo}
             onSelectRepo={(repo) => setSelectedRepo(repo)}
           />
           <ReferrersChart data={referrers} loading={referrersLoading} />
