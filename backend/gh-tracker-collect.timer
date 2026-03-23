@@ -1,0 +1,10 @@
+[Unit]
+Description=Run gh-tracker collection every 12 hours
+
+[Timer]
+OnCalendar=*-*-* 06,18:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

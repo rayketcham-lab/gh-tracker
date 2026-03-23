@@ -15,6 +15,10 @@ import VisitorDrilldown from './components/VisitorDrilldown'
 import PeoplePanel from './components/PeoplePanel'
 import IssuesPanel from './components/IssuesPanel'
 import RepoHeader from './components/RepoHeader'
+import CommitHeatmap from './components/CommitHeatmap'
+import CodeFrequencyChart from './components/CodeFrequencyChart'
+import LanguageChart from './components/LanguageChart'
+import ReleasesPanel from './components/ReleasesPanel'
 
 interface VisitorSummary {
   repo_name: string
@@ -221,6 +225,23 @@ function App() {
             {/* Drill-down row 0: Repo metadata header */}
             <RepoHeader repoName={drilldownRepo} />
 
+            {/* Drill-down row 0b: Commit heatmap + Code frequency */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 16,
+              marginBottom: 16,
+            }}>
+              <CommitHeatmap
+                owner={drilldownRepo.split('/')[0]}
+                repo={drilldownRepo.split('/')[1]}
+              />
+              <CodeFrequencyChart
+                owner={drilldownRepo.split('/')[0]}
+                repo={drilldownRepo.split('/')[1]}
+              />
+            </div>
+
             {/* Drill-down row 1: Visitors + People */}
             <div style={{
               display: 'grid',
@@ -234,9 +255,24 @@ function App() {
               />
               <PeoplePanel repoName={drilldownRepo} />
             </div>
+
             {/* Drill-down row 2: Issues (full width) */}
-            <div style={{ marginBottom: 24 }}>
+            <div style={{ marginBottom: 16 }}>
               <IssuesPanel repoName={drilldownRepo} />
+            </div>
+
+            {/* Drill-down row 3: Language chart + Releases side by side */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 16,
+              marginBottom: 24,
+            }}>
+              <LanguageChart repoName={drilldownRepo} />
+              <ReleasesPanel
+                owner={drilldownRepo.split('/')[0]}
+                repo={drilldownRepo.split('/')[1]}
+              />
             </div>
           </>
         )}

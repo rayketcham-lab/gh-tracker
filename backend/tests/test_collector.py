@@ -387,11 +387,58 @@ class TestMultiRepoCollection:
                 json={"Python": 1000},
                 headers={"X-RateLimit-Remaining": "4978"},
             )
+            # New stats endpoints (4)
+            httpx_mock.add_response(
+                url=f"https://api.github.com/repos/owner/{repo}/stats/commit_activity",
+                json=[],
+                headers={"X-RateLimit-Remaining": "4977"},
+            )
+            httpx_mock.add_response(
+                url=f"https://api.github.com/repos/owner/{repo}/stats/code_frequency",
+                json=[],
+                headers={"X-RateLimit-Remaining": "4976"},
+            )
+            httpx_mock.add_response(
+                url=f"https://api.github.com/repos/owner/{repo}/community/profile",
+                json={"health_percentage": 75},
+                headers={"X-RateLimit-Remaining": "4975"},
+            )
+            httpx_mock.add_response(
+                url=f"https://api.github.com/repos/owner/{repo}/releases?per_page=100",
+                json=[],
+                headers={"X-RateLimit-Remaining": "4974"},
+            )
+
+        # GraphQL summary (called once after the per-repo loop)
+        httpx_mock.add_response(
+            url="https://api.github.com/graphql",
+            method="POST",
+            json={
+                "data": {
+                    "repo0": {
+                        "stargazerCount": 5, "forkCount": 1,
+                        "issues": {"totalCount": 0},
+                        "pullRequests": {"totalCount": 0},
+                        "releases": {"totalCount": 0},
+                        "discussions": {"totalCount": 0},
+                    },
+                    "repo1": {
+                        "stargazerCount": 5, "forkCount": 1,
+                        "issues": {"totalCount": 0},
+                        "pullRequests": {"totalCount": 0},
+                        "releases": {"totalCount": 0},
+                        "discussions": {"totalCount": 0},
+                    },
+                }
+            },
+            headers={"X-RateLimit-Remaining": "4973"},
+        )
 
         await collector.collect_all()
 
-        # 4 traffic + 4 people + 2 issues + 4 metadata = 14 per repo x 2 repos = 28
-        assert len(httpx_mock.get_requests()) == 28
+        # 4 traffic + 4 people + 2 issues + 4 metadata + 4 new stats = 18 per repo x 2 repos
+        # + 1 GraphQL call = 37
+        assert len(httpx_mock.get_requests()) == 37
 
 
 # --- Database schema tests ---

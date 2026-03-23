@@ -131,7 +131,34 @@ class Database:
                 total_commits INTEGER DEFAULT 0,
                 releases_count INTEGER DEFAULT 0,
                 languages_json TEXT DEFAULT '{}',
-                collected_at TEXT DEFAULT ''
+                collected_at TEXT DEFAULT '',
+                health_percentage INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS commit_activity (
+                repo_name TEXT NOT NULL,
+                week_timestamp INTEGER NOT NULL,
+                days TEXT NOT NULL,
+                total INTEGER DEFAULT 0,
+                UNIQUE(repo_name, week_timestamp)
+            );
+
+            CREATE TABLE IF NOT EXISTS code_frequency (
+                repo_name TEXT NOT NULL,
+                week_timestamp INTEGER NOT NULL,
+                additions INTEGER DEFAULT 0,
+                deletions INTEGER DEFAULT 0,
+                UNIQUE(repo_name, week_timestamp)
+            );
+
+            CREATE TABLE IF NOT EXISTS release_assets (
+                repo_name TEXT NOT NULL,
+                release_tag TEXT NOT NULL,
+                asset_name TEXT NOT NULL,
+                download_count INTEGER DEFAULT 0,
+                size_bytes INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT '',
+                UNIQUE(repo_name, release_tag, asset_name)
             );
 
             CREATE INDEX IF NOT EXISTS idx_daily_repo_date ON daily_metrics(repo_name, date);
@@ -143,6 +170,9 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_forkers_repo ON forkers(repo_name);
             CREATE INDEX IF NOT EXISTS idx_contributors_repo ON contributors(repo_name);
             CREATE INDEX IF NOT EXISTS idx_metadata_repo ON repo_metadata(repo_name);
+            CREATE INDEX IF NOT EXISTS idx_commit_activity_repo ON commit_activity(repo_name);
+            CREATE INDEX IF NOT EXISTS idx_code_frequency_repo ON code_frequency(repo_name);
+            CREATE INDEX IF NOT EXISTS idx_release_assets_repo ON release_assets(repo_name);
         """)
 
     async def list_tables(self) -> list[str]:
@@ -528,7 +558,7 @@ class Database:
             "watchers_count", "open_issues_count", "size_kb", "license",
             "created_at", "updated_at", "pushed_at", "default_branch",
             "homepage", "total_commits", "releases_count", "languages_json",
-            "collected_at",
+            "collected_at", "health_percentage",
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         fields["repo_name"] = repo_name
@@ -565,3 +595,102 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    # --- Commit activity ---
+
+    async def upsert_commit_activity(
+        self, repo_name: str, week_timestamp: int, days: str, total: int
+    ) -> None:
+        """Upsert a single week of commit activity."""
+        await self._db.execute(
+            "INSERT OR REPLACE INTO commit_activity "
+            "(repo_name, week_timestamp, days, total) VALUES (?, ?, ?, ?)",
+            (repo_name, week_timestamp, days, total),
+        )
+        await self._db.commit()
+
+    async def get_commit_activity(self, repo_name: str) -> list[dict]:
+        """Get all 52 weeks of commit activity for a repo."""
+        cursor = await self._db.execute(
+            "SELECT week_timestamp, days, total FROM commit_activity "
+            "WHERE repo_name = ? ORDER BY week_timestamp",
+            (repo_name,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    # --- Code frequency ---
+
+    async def upsert_code_frequency(
+        self, repo_name: str, week_timestamp: int, additions: int, deletions: int
+    ) -> None:
+        """Upsert a single week of code frequency (additions/deletions)."""
+        await self._db.execute(
+            "INSERT OR REPLACE INTO code_frequency "
+            "(repo_name, week_timestamp, additions, deletions) VALUES (?, ?, ?, ?)",
+            (repo_name, week_timestamp, additions, deletions),
+        )
+        await self._db.commit()
+
+    async def get_code_frequency(self, repo_name: str) -> list[dict]:
+        """Get all weeks of code frequency for a repo."""
+        cursor = await self._db.execute(
+            "SELECT week_timestamp, additions, deletions FROM code_frequency "
+            "WHERE repo_name = ? ORDER BY week_timestamp",
+            (repo_name,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    # --- Release assets ---
+
+    async def upsert_release_asset(
+        self,
+        repo_name: str,
+        release_tag: str,
+        asset_name: str,
+        download_count: int = 0,
+        size_bytes: int = 0,
+        created_at: str = "",
+    ) -> None:
+        """Upsert a single release asset with its download count."""
+        await self._db.execute(
+            "INSERT OR REPLACE INTO release_assets "
+            "(repo_name, release_tag, asset_name, download_count, size_bytes, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (repo_name, release_tag, asset_name, download_count, size_bytes, created_at),
+        )
+        await self._db.commit()
+
+    async def get_release_assets(self, repo_name: str) -> list[dict]:
+        """Get all release assets for a repo, grouped by release tag."""
+        cursor = await self._db.execute(
+            "SELECT release_tag, asset_name, download_count, size_bytes, created_at "
+            "FROM release_assets WHERE repo_name = ? "
+            "ORDER BY created_at DESC, release_tag, asset_name",
+            (repo_name,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    # --- Export helpers ---
+
+    async def get_all_daily_metrics(self) -> list[dict]:
+        """Return every row in daily_metrics, ordered by repo + date."""
+        cursor = await self._db.execute(
+            "SELECT * FROM daily_metrics ORDER BY repo_name, date"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_all_stargazers(self) -> list[dict]:
+        """Return all stargazers across all repos."""
+        cursor = await self._db.execute(
+            "SELECT repo_name, username, starred_at FROM stargazers "
+            "ORDER BY repo_name, starred_at DESC"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_all_contributors(self) -> list[dict]:
+        """Return all contributors across all repos."""
+        cursor = await self._db.execute(
+            "SELECT repo_name, username, commits, additions, deletions "
+            "FROM contributors ORDER BY repo_name, commits DESC"
+        )
+        return [dict(row) for row in await cursor.fetchall()]

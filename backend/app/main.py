@@ -1,6 +1,11 @@
 """FastAPI application for the GitHub analytics dashboard."""
 
+import csv
+import io
+import json
+
 from fastapi import FastAPI, Query
+from fastapi.responses import StreamingResponse
 
 from app.database import Database
 
@@ -133,6 +138,7 @@ def create_app(db: Database | None = None) -> FastAPI:
                 "releases_count": 0,
                 "languages_json": "{}",
                 "collected_at": "",
+                "health_percentage": 0,
             }
         return meta
 
@@ -152,6 +158,92 @@ def create_app(db: Database | None = None) -> FastAPI:
     ) -> list[dict]:
         return await app.state.db.get_issues(
             f"{owner}/{repo}", state=state
+        )
+
+    # --- Repository statistics endpoints (Feature 2) ---
+
+    @app.get("/api/repos/{owner}/{repo}/commit-activity")
+    async def get_commit_activity(owner: str, repo: str) -> list[dict]:
+        rows = await app.state.db.get_commit_activity(f"{owner}/{repo}")
+        result = []
+        for row in rows:
+            days_raw = row.get("days", "[]")
+            try:
+                days = json.loads(days_raw) if isinstance(days_raw, str) else days_raw
+            except (ValueError, TypeError):
+                days = [0, 0, 0, 0, 0, 0, 0]
+            result.append({
+                "week_timestamp": row["week_timestamp"],
+                "days": days,
+                "total": row.get("total", 0),
+            })
+        return result
+
+    @app.get("/api/repos/{owner}/{repo}/code-frequency")
+    async def get_code_frequency(owner: str, repo: str) -> list[dict]:
+        return await app.state.db.get_code_frequency(f"{owner}/{repo}")
+
+    # --- Release download tracking endpoint (Feature 4) ---
+
+    @app.get("/api/repos/{owner}/{repo}/releases")
+    async def get_releases(owner: str, repo: str) -> list[dict]:
+        return await app.state.db.get_release_assets(f"{owner}/{repo}")
+
+    # --- CSV/JSON export endpoints (Feature 5) ---
+
+    @app.get("/api/export/traffic")
+    async def export_traffic(fmt: str = Query("json", alias="format")) -> StreamingResponse:
+        rows = await app.state.db.get_all_daily_metrics()
+        if fmt == "csv":
+            output = io.StringIO()
+            if rows:
+                writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+            else:
+                output.write("")
+            output.seek(0)
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=traffic.csv"},
+            )
+        # Default: JSON
+        return StreamingResponse(
+            iter([json.dumps(rows)]),
+            media_type="application/json",
+        )
+
+    @app.get("/api/export/people")
+    async def export_people(fmt: str = Query("json", alias="format")) -> StreamingResponse:
+        stargazers = await app.state.db.get_all_stargazers()
+        contributors = await app.state.db.get_all_contributors()
+
+        if fmt == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["repo_name", "username", "type", "starred_at",
+                             "commits", "additions", "deletions"])
+            for s in stargazers:
+                writer.writerow([
+                    s["repo_name"], s["username"], "stargazer",
+                    s.get("starred_at", ""), "", "", "",
+                ])
+            for c in contributors:
+                writer.writerow([
+                    c["repo_name"], c["username"], "contributor",
+                    "", c["commits"], c["additions"], c["deletions"],
+                ])
+            output.seek(0)
+            return StreamingResponse(
+                iter([output.getvalue()]),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=people.csv"},
+            )
+        # Default: JSON
+        return StreamingResponse(
+            iter([json.dumps({"stargazers": stargazers, "contributors": contributors})]),
+            media_type="application/json",
         )
 
     return app

@@ -9,6 +9,8 @@ import httpx
 
 from app.database import Database
 
+GITHUB_GRAPHQL = "https://api.github.com/graphql"
+
 logger = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
@@ -310,6 +312,74 @@ class GitHubCollector:
 
         await self.db.upsert_repo_metadata(repo, **metadata)
 
+    async def collect_commit_activity(self, repo: str) -> None:
+        """Collect 52-week commit activity histogram for a repository."""
+        url = f"{GITHUB_API}/repos/{repo}/stats/commit_activity"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        if not isinstance(data, list):
+            return
+        for week in data:
+            week_ts = week.get("week", 0)
+            days = json.dumps(week.get("days", [0] * 7))
+            total = week.get("total", 0)
+            await self.db.upsert_commit_activity(repo, week_ts, days, total)
+
+    async def collect_code_frequency(self, repo: str) -> None:
+        """Collect weekly additions/deletions totals for a repository."""
+        url = f"{GITHUB_API}/repos/{repo}/stats/code_frequency"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        if not isinstance(data, list):
+            return
+        for entry in data:
+            # Each entry is [week_timestamp, additions, deletions]
+            if len(entry) >= 3:
+                week_ts = entry[0]
+                additions = entry[1]
+                deletions = abs(entry[2])  # GitHub returns negative for deletions
+                await self.db.upsert_code_frequency(repo, week_ts, additions, deletions)
+
+    async def collect_community_profile(self, repo: str) -> None:
+        """Collect community health profile for a repository."""
+        url = f"{GITHUB_API}/repos/{repo}/community/profile"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        health_percentage = data.get("health_percentage", 0)
+        await self.db.upsert_repo_metadata(repo, health_percentage=health_percentage)
+
+    async def collect_releases(self, repo: str) -> None:
+        """Collect releases and per-asset download counts."""
+        url = f"{GITHUB_API}/repos/{repo}/releases?per_page=100"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        if not isinstance(data, list):
+            return
+        for release in data:
+            tag = release.get("tag_name", "")
+            if not tag:
+                continue
+            for asset in release.get("assets", []):
+                asset_name = asset.get("name", "")
+                if not asset_name:
+                    continue
+                await self.db.upsert_release_asset(
+                    repo_name=repo,
+                    release_tag=tag,
+                    asset_name=asset_name,
+                    download_count=asset.get("download_count", 0),
+                    size_bytes=asset.get("size", 0),
+                    created_at=asset.get("created_at", ""),
+                )
+
     async def collect_issues(self, repo: str) -> None:
         """Collect open and recently closed issues and PRs."""
         for state in ("open", "closed"):
@@ -335,6 +405,60 @@ class GitHubCollector:
                     is_pr=is_pr,
                 )
 
+    async def collect_graphql_summary(self, repos: list[str]) -> None:
+        """Fetch aggregate stats for all repos in a single GraphQL query.
+
+        Retrieves stargazerCount, forkCount, open issues/PRs, releases, and
+        discussions counts, then updates repo_metadata for each repo found.
+        """
+        self._check_rate_limit()
+        client = await self._get_client()
+
+        # Build per-repo fragment aliases — GraphQL field names cannot contain "/"
+        fragments = []
+        alias_map: dict[str, str] = {}
+        for i, repo in enumerate(repos):
+            parts = repo.split("/", 1)
+            if len(parts) != 2:
+                continue
+            owner, name = parts
+            alias = f"repo{i}"
+            alias_map[alias] = repo
+            fragments.append(f"""
+  {alias}: repository(owner: "{owner}", name: "{name}") {{
+    stargazerCount
+    forkCount
+    issues(states: OPEN) {{ totalCount }}
+    pullRequests(states: OPEN) {{ totalCount }}
+    releases {{ totalCount }}
+    discussions {{ totalCount }}
+  }}""")
+
+        if not fragments:
+            return
+
+        query = "query {" + "".join(fragments) + "\n}"
+        response = await client.post(
+            GITHUB_GRAPHQL,
+            json={"query": query},
+        )
+        self._update_rate_limit(response)
+        response.raise_for_status()
+
+        result = response.json()
+        gql_data = result.get("data") or {}
+        for alias, repo in alias_map.items():
+            repo_data = gql_data.get(alias)
+            if not repo_data:
+                continue
+            await self.db.upsert_repo_metadata(
+                repo,
+                stars=repo_data.get("stargazerCount", 0),
+                forks=repo_data.get("forkCount", 0),
+                open_issues_count=repo_data.get("issues", {}).get("totalCount", 0),
+                releases_count=repo_data.get("releases", {}).get("totalCount", 0),
+            )
+
     async def collect_all(self) -> None:
         """Collect all data for all configured repositories."""
         for repo in self.repos:
@@ -350,6 +474,10 @@ class GitHubCollector:
                     self.collect_contributors,
                     self.collect_issues,
                     self.collect_metadata,
+                    self.collect_commit_activity,
+                    self.collect_code_frequency,
+                    self.collect_community_profile,
+                    self.collect_releases,
                 ):
                     try:
                         await people_fn(repo)
@@ -361,3 +489,9 @@ class GitHubCollector:
             except Exception:
                 logger.exception("Error collecting data for %s", repo)
                 continue
+
+        # GraphQL bulk summary after per-repo loop
+        try:
+            await self.collect_graphql_summary(self.repos)
+        except Exception:
+            logger.warning("Failed collect_graphql_summary")

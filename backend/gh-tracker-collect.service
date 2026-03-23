@@ -1,0 +1,13 @@
+[Unit]
+Description=gh-tracker data collection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pleb
+WorkingDirectory=/opt/gh-tracker/backend
+Environment=GH_TRACKER_PUBLIC_ONLY=true
+ExecStart=/opt/gh-tracker/backend/.venv/bin/python collect_live.py
+StandardOutput=journal
+StandardError=journal
