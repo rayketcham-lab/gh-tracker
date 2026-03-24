@@ -1,10 +1,13 @@
 """FastAPI application for the GitHub analytics dashboard."""
 
 import csv
+import hashlib
+import hmac
 import io
 import json
+import os
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.database import Database
@@ -213,6 +216,161 @@ def create_app(db: Database | None = None) -> FastAPI:
             iter([json.dumps(rows)]),
             media_type="application/json",
         )
+
+    # --- Social mentions endpoints (Feature: Issue #9) ---
+
+    @app.get("/api/repos/{owner}/{repo}/mentions")
+    async def get_mentions(owner: str, repo: str) -> list[dict]:
+        return await app.state.db.get_social_mentions(f"{owner}/{repo}")
+
+    @app.get("/api/mentions/recent")
+    async def get_recent_mentions(limit: int = Query(50)) -> list[dict]:
+        return await app.state.db.get_recent_social_mentions(limit=limit)
+
+    # --- Enrichment endpoints (Feature: Issue #8) ---
+
+    @app.get("/api/repos/{owner}/{repo}/enrichment")
+    async def get_enrichment(owner: str, repo: str) -> dict:
+        repo_name = f"{owner}/{repo}"
+        meta = await app.state.db.get_repo_metadata(repo_name)
+        if meta is None:
+            return {
+                "repo_name": repo_name,
+                "scorecard_score": -1,
+                "scorecard_json": "{}",
+                "dependent_repos_count": 0,
+                "source_rank": 0,
+            }
+        return {
+            "repo_name": repo_name,
+            "scorecard_score": meta.get("scorecard_score", -1),
+            "scorecard_json": meta.get("scorecard_json", "{}"),
+            "dependent_repos_count": meta.get("dependent_repos_count", 0),
+            "source_rank": meta.get("source_rank", 0),
+        }
+
+    # --- Citation endpoints (Feature: Issue #19) ---
+
+    @app.get("/api/repos/{owner}/{repo}/citations")
+    async def get_citations(owner: str, repo: str) -> list[dict]:
+        return await app.state.db.get_citations(f"{owner}/{repo}")
+
+    @app.get("/api/citations/summary")
+    async def get_citations_summary() -> list[dict]:
+        return await app.state.db.get_citation_summary()
+
+    # --- Webhook endpoints (Feature: Issue #3) ---
+
+    @app.post("/api/webhooks/github")
+    async def github_webhook(
+        request: Request,
+        x_hub_signature_256: str | None = Header(None),
+        x_github_event: str | None = Header(None),
+        x_github_delivery: str | None = Header(None),
+    ) -> dict:
+        """Receive and process GitHub webhook events."""
+        body = await request.body()
+
+        # Verify HMAC-SHA256 signature when a secret is configured
+        webhook_secret = os.environ.get("GH_WEBHOOK_SECRET", "")
+        if webhook_secret:
+            if not x_hub_signature_256:
+                raise HTTPException(status_code=401, detail="Missing signature header")
+            expected = "sha256=" + hmac.new(
+                webhook_secret.encode(), body, hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(expected, x_hub_signature_256):
+                raise HTTPException(status_code=401, detail="Invalid signature")
+
+        event_type = x_github_event or "unknown"
+        delivery_id = x_github_delivery or ""
+
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+
+        action = payload.get("action", "")
+        repo_data = payload.get("repository", {})
+        repo_name = repo_data.get("full_name", "")
+        sender_data = payload.get("sender", {})
+        sender = sender_data.get("login", "")
+
+        # Persist the event (duplicate delivery_id is silently ignored)
+        await app.state.db.store_webhook_event(
+            delivery_id=delivery_id,
+            event_type=event_type,
+            action=action,
+            repo_name=repo_name,
+            sender=sender,
+            payload_json=body.decode("utf-8", errors="replace"),
+        )
+
+        # Side-effects: keep local data in sync with webhook data
+        if event_type == "star" and repo_name:
+            if action == "created":
+                starred_at = payload.get("starred_at") or ""
+                if sender:
+                    await app.state.db.upsert_stargazer(repo_name, sender, starred_at)
+            elif action == "deleted":
+                # Remove from stargazers table
+                await app.state.db._db.execute(
+                    "DELETE FROM stargazers WHERE repo_name = ? AND username = ?",
+                    (repo_name, sender),
+                )
+                await app.state.db._db.commit()
+
+        elif event_type == "fork" and repo_name and sender:
+            forkee = payload.get("forkee", {})
+            fork_repo = forkee.get("full_name", "")
+            forked_at = forkee.get("created_at", "")
+            await app.state.db.upsert_forker(repo_name, sender, fork_repo, forked_at)
+
+        elif event_type in ("issues", "pull_request") and repo_name:
+            item = payload.get("issue") or payload.get("pull_request") or {}
+            if item:
+                is_pr = event_type == "pull_request"
+                user = item.get("user", {})
+                label_names = ",".join(
+                    lb.get("name", "") for lb in item.get("labels", [])
+                )
+                await app.state.db.upsert_issue(
+                    repo_name,
+                    item.get("number", 0),
+                    item.get("title", ""),
+                    item.get("state", ""),
+                    user.get("login", ""),
+                    label_names,
+                    item.get("created_at", ""),
+                    item.get("closed_at"),
+                    is_pr=is_pr,
+                )
+
+        return {"status": "ok", "event": event_type}
+
+    @app.get("/api/webhooks/events")
+    async def list_webhook_events() -> list[dict]:
+        """Return the last 100 webhook events received."""
+        return await app.state.db.get_recent_webhook_events(limit=100)
+
+    # --- Bot detection endpoint (Feature: Issue #7) ---
+
+    @app.get("/api/repos/{owner}/{repo}/bot-analysis")
+    async def get_bot_analysis(owner: str, repo: str) -> dict:
+        """Return bot/automation analysis for a repository's traffic data."""
+        return await app.state.db.get_bot_analysis(f"{owner}/{repo}")
+
+    # --- Competitive intelligence endpoints (Feature: Issue #10) ---
+
+    @app.get("/api/repos/{owner}/{repo}/watcher-changes")
+    async def get_watcher_changes(owner: str, repo: str) -> list[dict]:
+        """Return the history of watcher additions and removals for a repo."""
+        return await app.state.db.get_watcher_changes(f"{owner}/{repo}")
+
+    @app.get("/api/repos/{owner}/{repo}/referrer-trends")
+    async def get_referrer_trends(owner: str, repo: str) -> list[dict]:
+        """Return referrers grouped by date with appeared/disappeared annotations."""
+        return await app.state.db.get_referrer_trends(f"{owner}/{repo}")
 
     @app.get("/api/export/people")
     async def export_people(fmt: str = Query("json", alias="format")) -> StreamingResponse:

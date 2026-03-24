@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 
 import httpx
@@ -30,6 +31,7 @@ class GitHubCollector:
         self.repos = repos
         self.rate_limit_remaining: int | None = None
         self._client: httpx.AsyncClient | None = None
+        self._social_client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -47,6 +49,9 @@ class GitHubCollector:
         if self._client:
             await self._client.aclose()
             self._client = None
+        if self._social_client:
+            await self._social_client.aclose()
+            self._social_client = None
 
     def _check_rate_limit(self) -> None:
         if self.rate_limit_remaining is not None and self.rate_limit_remaining < RATE_LIMIT_FLOOR:
@@ -310,6 +315,11 @@ class GitHubCollector:
         except Exception:
             logger.warning("Could not get languages for %s", repo)
 
+        # --- Security and analysis config ---
+        security_and_analysis = data.get("security_and_analysis")
+        if security_and_analysis is not None:
+            metadata["security_config_json"] = json.dumps(security_and_analysis)
+
         await self.db.upsert_repo_metadata(repo, **metadata)
 
     async def collect_commit_activity(self, repo: str) -> None:
@@ -459,6 +469,293 @@ class GitHubCollector:
                 releases_count=repo_data.get("releases", {}).get("totalCount", 0),
             )
 
+    async def _get_social_client(self) -> httpx.AsyncClient:
+        if self._social_client is None:
+            self._social_client = httpx.AsyncClient(
+                headers={"User-Agent": "gh-tracker/1.0 (self-hosted analytics)"},
+                timeout=15.0,
+            )
+        return self._social_client
+
+    async def collect_social_mentions(self, repo: str) -> None:
+        """Collect social mentions from Hacker News, Reddit, and Dev.to."""
+        client = await self._get_social_client()
+        parts = repo.split("/", 1)
+        repo_name_slug = parts[1].lower() if len(parts) == 2 else repo.lower()
+
+        # --- Hacker News ---
+        try:
+            hn_url = f"https://hn.algolia.com/api/v1/search?query=github.com/{repo}&tags=story"
+            resp = await client.get(hn_url)
+            resp.raise_for_status()
+            for hit in resp.json().get("hits", []):
+                url = hit.get("url") or ""
+                title = hit.get("title") or ""
+                score = hit.get("points") or 0
+                author = hit.get("author") or ""
+                if url:
+                    await self.db.upsert_social_mention(
+                        repo, "hackernews", url, title=title, score=score, author=author
+                    )
+        except Exception:
+            logger.warning("Could not collect HN mentions for %s", repo)
+
+        # --- Reddit ---
+        try:
+            reddit_url = (
+                f"https://www.reddit.com/search.json"
+                f"?q=github.com/{repo}&sort=new&limit=10"
+            )
+            resp = await client.get(reddit_url)
+            resp.raise_for_status()
+            for child in resp.json().get("data", {}).get("children", []):
+                post = child.get("data", {})
+                url = post.get("url") or ""
+                title = post.get("title") or ""
+                score = post.get("score") or 0
+                author = post.get("author") or ""
+                permalink = post.get("permalink") or ""
+                # Use full Reddit post URL as the canonical URL if available
+                post_url = f"https://www.reddit.com{permalink}" if permalink else url
+                if post_url:
+                    await self.db.upsert_social_mention(
+                        repo, "reddit", post_url, title=title, score=score, author=author
+                    )
+        except Exception:
+            logger.warning("Could not collect Reddit mentions for %s", repo)
+
+        # --- Dev.to ---
+        try:
+            devto_url = (
+                f"https://dev.to/api/articles?tag={repo_name_slug}&per_page=5"
+            )
+            resp = await client.get(devto_url)
+            resp.raise_for_status()
+            for article in resp.json():
+                url = article.get("url") or ""
+                title = article.get("title") or ""
+                score = article.get("positive_reactions_count") or 0
+                author_obj = article.get("user") or {}
+                author = author_obj.get("username") or ""
+                if url:
+                    await self.db.upsert_social_mention(
+                        repo, "devto", url, title=title, score=score, author=author
+                    )
+        except Exception:
+            logger.warning("Could not collect Dev.to mentions for %s", repo)
+
+    async def collect_scorecard(self, repo: str) -> None:
+        """Collect OpenSSF Scorecard data for a repository."""
+        parts = repo.split("/", 1)
+        if len(parts) != 2:
+            return
+        owner, name = parts
+        client = await self._get_social_client()
+        try:
+            url = f"https://api.scorecard.dev/projects/github.com/{owner}/{name}"
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            score = data.get("score", -1)
+            scorecard_json = json.dumps(data)
+            await self.db.upsert_repo_metadata(
+                repo,
+                scorecard_score=score,
+                scorecard_json=scorecard_json,
+            )
+        except Exception:
+            logger.warning("Could not collect Scorecard data for %s", repo)
+
+    async def collect_libraries_io(self, repo: str) -> None:
+        """Collect Libraries.io data for a repository (requires LIBRARIES_IO_KEY)."""
+        api_key = os.environ.get("LIBRARIES_IO_KEY")
+        if not api_key:
+            return
+        parts = repo.split("/", 1)
+        if len(parts) != 2:
+            return
+        owner, name = parts
+        client = await self._get_social_client()
+        try:
+            url = f"https://libraries.io/api/github/{owner}/{name}?api_key={api_key}"
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            dependent_repos_count = data.get("dependent_repos_count") or 0
+            source_rank = data.get("rank") or 0
+            await self.db.upsert_repo_metadata(
+                repo,
+                dependent_repos_count=dependent_repos_count,
+                source_rank=source_rank,
+            )
+        except Exception:
+            logger.warning("Could not collect Libraries.io data for %s", repo)
+
+    async def detect_watcher_changes(self, repo: str) -> None:
+        """Compare current watchers on GitHub against the DB, storing additions/removals."""
+        url = f"{GITHUB_API}/repos/{repo}/subscribers"
+        response = await self._request(url)
+        if response is None:
+            return
+
+        current_usernames = {
+            user.get("login", "")
+            for user in response.json()
+            if user.get("login")
+        }
+
+        existing_rows = await self.db.get_watchers(repo)
+        existing_usernames = {row["username"] for row in existing_rows}
+
+        added = current_usernames - existing_usernames
+        removed = existing_usernames - current_usernames
+
+        for username in added:
+            await self.db.upsert_watcher(repo, username)
+            await self.db.store_watcher_change(repo, username, "added")
+
+        for username in removed:
+            await self.db.store_watcher_change(repo, username, "removed")
+
+    async def collect_citations(self, repo: str) -> None:
+        """Collect academic citations from Semantic Scholar and OpenAlex."""
+        client = await self._get_social_client()
+
+        # --- Semantic Scholar ---
+        try:
+            ss_url = (
+                f"https://api.semanticscholar.org/graph/v1/paper/search"
+                f"?query=github.com/{repo}&limit=5"
+                f"&fields=title,authors,year,citationCount,externalIds"
+            )
+            resp = await client.get(ss_url)
+            resp.raise_for_status()
+            for paper in resp.json().get("data", []):
+                paper_id = paper.get("paperId") or ""
+                title = paper.get("title") or ""
+                authors_list = paper.get("authors") or []
+                authors = ", ".join(a.get("name", "") for a in authors_list)
+                year = paper.get("year") or 0
+                citation_count = paper.get("citationCount") or 0
+                url = (
+                    f"https://www.semanticscholar.org/paper/{paper_id}"
+                    if paper_id
+                    else ""
+                )
+                if url:
+                    await self.db.upsert_citation(
+                        repo, "semantic_scholar", url,
+                        title=title, authors=authors,
+                        year=year, citation_count=citation_count,
+                    )
+        except Exception:
+            logger.warning("Could not collect Semantic Scholar citations for %s", repo)
+
+        # --- OpenAlex ---
+        try:
+            oa_url = (
+                f"https://api.openalex.org/works"
+                f"?search=github.com/{repo}&per_page=5"
+            )
+            resp = await client.get(oa_url)
+            resp.raise_for_status()
+            for work in resp.json().get("results", []):
+                work_id = work.get("id") or ""
+                title = work.get("title") or ""
+                authorships = work.get("authorships") or []
+                authors = ", ".join(
+                    a.get("author", {}).get("display_name", "")
+                    for a in authorships
+                )
+                pub_year = work.get("publication_year") or 0
+                citation_count = work.get("cited_by_count") or 0
+                url = work_id  # OpenAlex ID is a URL
+                if url:
+                    await self.db.upsert_citation(
+                        repo, "openalex", url,
+                        title=title, authors=authors,
+                        year=pub_year, citation_count=citation_count,
+                    )
+        except Exception:
+            logger.warning("Could not collect OpenAlex citations for %s", repo)
+
+    async def collect_workflow_runs(self, repo: str) -> None:
+        """Collect the 30 most recent CI workflow runs for a repository."""
+        url = f"{GITHUB_API}/repos/{repo}/actions/runs?per_page=30"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        if not isinstance(data, dict):
+            return
+        for run in data.get("workflow_runs", []):
+            run_id = run.get("id", 0)
+            if not run_id:
+                continue
+            workflow_name = run.get("name") or ""
+            status = run.get("status") or ""
+            conclusion = run.get("conclusion") or ""
+            event = run.get("event") or ""
+            branch = run.get("head_branch") or ""
+            created_at = run.get("created_at") or ""
+            run_started_at = run.get("run_started_at") or ""
+            updated_at = run.get("updated_at") or ""
+
+            # Calculate duration from run_started_at to updated_at
+            duration_seconds = 0
+            try:
+                if run_started_at and updated_at:
+                    start = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+                    end = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                    duration_seconds = max(0, int((end - start).total_seconds()))
+            except (ValueError, TypeError):
+                pass
+
+            await self.db.upsert_workflow_run(
+                repo_name=repo,
+                run_id=run_id,
+                workflow_name=workflow_name,
+                status=status,
+                conclusion=conclusion,
+                event=event,
+                branch=branch,
+                created_at=created_at,
+                run_started_at=run_started_at,
+                updated_at=updated_at,
+                duration_seconds=duration_seconds,
+            )
+
+    async def collect_punch_card(self, repo: str) -> None:
+        """Collect commit time punch-card data (168 entries: 7 days x 24 hours)."""
+        url = f"{GITHUB_API}/repos/{repo}/stats/punch_card"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        if not isinstance(data, list):
+            return
+        for entry in data:
+            # Each entry is [day, hour, commits]
+            if len(entry) >= 3:
+                day, hour, commits = entry[0], entry[1], entry[2]
+                await self.db.upsert_punch_card(repo, day, hour, commits)
+
+    async def collect_participation(self, repo: str) -> None:
+        """Collect 52-week owner vs. community participation stats."""
+        url = f"{GITHUB_API}/repos/{repo}/stats/participation"
+        response = await self._request(url)
+        if response is None:
+            return
+        data = response.json()
+        if not isinstance(data, dict):
+            return
+        all_commits = data.get("all", [])
+        owner_commits = data.get("owner", [])
+        if not isinstance(all_commits, list) or not isinstance(owner_commits, list):
+            return
+        for week_offset, (all_c, owner_c) in enumerate(zip(all_commits, owner_commits)):
+            await self.db.upsert_participation(repo, week_offset, all_c, owner_c)
+
     async def collect_all(self) -> None:
         """Collect all data for all configured repositories."""
         for repo in self.repos:
@@ -478,6 +775,10 @@ class GitHubCollector:
                     self.collect_code_frequency,
                     self.collect_community_profile,
                     self.collect_releases,
+                    self.collect_social_mentions,
+                    self.collect_scorecard,
+                    self.collect_libraries_io,
+                    self.collect_citations,
                 ):
                     try:
                         await people_fn(repo)

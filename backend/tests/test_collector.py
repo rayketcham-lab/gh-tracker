@@ -408,6 +408,37 @@ class TestMultiRepoCollection:
                 json=[],
                 headers={"X-RateLimit-Remaining": "4974"},
             )
+            # Social mentions (3: HN, Reddit, Dev.to)
+            httpx_mock.add_response(
+                url=f"https://hn.algolia.com/api/v1/search?query=github.com/owner/{repo}&tags=story",
+                json={"hits": []},
+            )
+            httpx_mock.add_response(
+                url=f"https://www.reddit.com/search.json?q=github.com/owner/{repo}&sort=new&limit=10",
+                json={"data": {"children": []}},
+            )
+            httpx_mock.add_response(
+                url=f"https://dev.to/api/articles?tag={repo}&per_page=5",
+                json=[],
+            )
+            # Scorecard (1)
+            httpx_mock.add_response(
+                url=f"https://api.scorecard.dev/projects/github.com/owner/{repo}",
+                json={"score": 7.0, "checks": []},
+            )
+            # Citations (2: Semantic Scholar, OpenAlex)
+            httpx_mock.add_response(
+                url=(
+                    f"https://api.semanticscholar.org/graph/v1/paper/search"
+                    f"?query=github.com/owner/{repo}&limit=5"
+                    f"&fields=title,authors,year,citationCount,externalIds"
+                ),
+                json={"data": []},
+            )
+            httpx_mock.add_response(
+                url=f"https://api.openalex.org/works?search=github.com/owner/{repo}&per_page=5",
+                json={"results": []},
+            )
 
         # GraphQL summary (called once after the per-repo loop)
         httpx_mock.add_response(
@@ -436,9 +467,10 @@ class TestMultiRepoCollection:
 
         await collector.collect_all()
 
-        # 4 traffic + 4 people + 2 issues + 4 metadata + 4 new stats = 18 per repo x 2 repos
-        # + 1 GraphQL call = 37
-        assert len(httpx_mock.get_requests()) == 37
+        # 4 traffic + 4 people + 2 issues + 4 metadata + 4 new stats
+        # + 3 social mentions + 1 scorecard + 2 citations = 24 per repo x 2 repos
+        # + 1 GraphQL call = 49
+        assert len(httpx_mock.get_requests()) == 49
 
 
 # --- Database schema tests ---

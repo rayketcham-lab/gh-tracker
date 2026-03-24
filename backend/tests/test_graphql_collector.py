@@ -266,6 +266,37 @@ class TestCollectGraphqlSummary:
             json=[],
             headers={"X-RateLimit-Remaining": "4983"},
         )
+        # Social mentions (3: HN, Reddit, Dev.to)
+        httpx_mock.add_response(
+            url="https://hn.algolia.com/api/v1/search?query=github.com/owner/myrepo&tags=story",
+            json={"hits": []},
+        )
+        httpx_mock.add_response(
+            url="https://www.reddit.com/search.json?q=github.com/owner/myrepo&sort=new&limit=10",
+            json={"data": {"children": []}},
+        )
+        httpx_mock.add_response(
+            url="https://dev.to/api/articles?tag=myrepo&per_page=5",
+            json=[],
+        )
+        # Scorecard (1)
+        httpx_mock.add_response(
+            url="https://api.scorecard.dev/projects/github.com/owner/myrepo",
+            json={"score": 8.0, "checks": []},
+        )
+        # Citations (2: Semantic Scholar, OpenAlex)
+        httpx_mock.add_response(
+            url=(
+                "https://api.semanticscholar.org/graph/v1/paper/search"
+                "?query=github.com/owner/myrepo&limit=5"
+                "&fields=title,authors,year,citationCount,externalIds"
+            ),
+            json={"data": []},
+        )
+        httpx_mock.add_response(
+            url="https://api.openalex.org/works?search=github.com/owner/myrepo&per_page=5",
+            json={"results": []},
+        )
         # GraphQL summary (called last)
         httpx_mock.add_response(
             url=GRAPHQL_URL,
