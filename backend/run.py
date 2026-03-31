@@ -7,6 +7,7 @@ import uvicorn
 
 from app.database import Database
 from app.main import create_app
+from app.server_config import get_server_port
 
 DB_PATH = os.environ.get("GH_TRACKER_DB", "../data/metrics.db")
 
@@ -20,7 +21,7 @@ async def main() -> None:
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=get_server_port(),
         log_level="info",
     )
     server = uvicorn.Server(config)

@@ -8,13 +8,25 @@ import json
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, field_validator
 
 from app.database import Database
 
 
+class RepoAddRequest(BaseModel):
+    repo_name: str
+
+    @field_validator("repo_name")
+    @classmethod
+    def must_contain_slash(cls, v: str) -> str:
+        if "/" not in v:
+            raise ValueError("repo_name must be in 'owner/repo' format")
+        return v
+
+
 def create_app(db: Database | None = None) -> FastAPI:
-    app = FastAPI(title="gh-tracker", version="0.1.0")
+    app = FastAPI(title="gh-tracker", version="0.1.0", docs_url="/api/docs")
 
     app.state.db = db
 
@@ -403,5 +415,131 @@ def create_app(db: Database | None = None) -> FastAPI:
             iter([json.dumps({"stargazers": stargazers, "contributors": contributors})]),
             media_type="application/json",
         )
+
+    # --- Repo management endpoints (Issue #24) ---
+
+    @app.post("/api/repos", status_code=201)
+    async def add_repo(body: RepoAddRequest) -> dict:
+        """Add a repository to the tracked set."""
+        await app.state.db.add_tracked_repo(body.repo_name)
+        return {"repo_name": body.repo_name}
+
+    @app.delete("/api/repos/{owner}/{repo}")
+    async def delete_repo(owner: str, repo: str) -> dict:
+        """Remove a repository from the tracked set."""
+        repo_name = f"{owner}/{repo}"
+        removed = await app.state.db.remove_tracked_repo(repo_name)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"Repo '{repo_name}' not found")
+        return {"repo_name": repo_name, "status": "deleted"}
+
+
+    # --- Workflow runs endpoint (Issue #29) ---
+
+    @app.get("/api/repos/{owner}/{repo}/workflow-runs")
+    async def get_workflow_runs(owner: str, repo: str) -> list[dict]:
+        return await app.state.db.get_workflow_runs(f"{owner}/{repo}")
+
+    # --- Admin endpoints (Issue #35) ---
+
+    @app.get("/api/admin/backup")
+    async def backup_database() -> FileResponse:
+        db_path = app.state.db.db_path
+        return FileResponse(
+            db_path,
+            media_type="application/octet-stream",
+            filename="gh-tracker-backup.db",
+        )
+
+    @app.get("/api/admin/status")
+    async def admin_status() -> dict:
+        return await app.state.db.get_status()
+
+
+    # --- Repo settings endpoints (Issue #28) ---
+
+    class RepoSettingsUpdate(BaseModel):
+        description: str | None = None
+        homepage: str | None = None
+        topics: list[str] | None = None
+        private: bool | None = None
+        has_issues: bool | None = None
+        has_wiki: bool | None = None
+        has_projects: bool | None = None
+        has_discussions: bool | None = None
+        allow_squash_merge: bool | None = None
+        allow_merge_commit: bool | None = None
+        allow_rebase_merge: bool | None = None
+        delete_branch_on_merge: bool | None = None
+        archived: bool | None = None
+
+        def has_any_field(self) -> bool:
+            return any(v is not None for v in self.model_dump().values())
+
+    @app.patch("/api/repos/{owner}/{repo}/settings")
+    async def update_repo_settings(owner: str, repo: str, body: RepoSettingsUpdate) -> dict:
+        """Proxy repo settings update to GitHub API."""
+        if not body.has_any_field():
+            raise HTTPException(status_code=422, detail="At least one field required")
+
+        import httpx
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            raise HTTPException(status_code=503, detail="No GitHub token configured")
+
+
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+
+        # GitHub API uses PUT for topics separately
+        topics = payload.pop("topics", None)
+
+        async with httpx.AsyncClient() as http:
+            headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+            if payload:
+                resp = await http.patch(
+                    f"https://api.github.com/repos/{owner}/{repo}",
+                    json=payload, headers=headers, timeout=15,
+                )
+                if resp.status_code >= 400:
+                    raise HTTPException(status_code=502, detail=f"GitHub API error: {resp.status_code}")
+
+            if topics is not None:
+                resp = await http.put(
+                    f"https://api.github.com/repos/{owner}/{repo}/topics",
+                    json={"names": topics}, headers=headers, timeout=15,
+                )
+                if resp.status_code >= 400:
+                    raise HTTPException(status_code=502, detail=f"GitHub API error: {resp.status_code}")
+
+        return {"status": "updated", "repo": f"{owner}/{repo}"}
+
+    # --- Security alerts endpoints (Issue #32) ---
+
+    @app.get("/api/repos/{owner}/{repo}/security/alerts")
+    async def get_security_alerts(
+        owner: str, repo: str,
+        severity: str | None = Query(None),
+        alert_type: str | None = Query(None),
+    ) -> list[dict]:
+        return await app.state.db.get_security_alerts(
+            f"{owner}/{repo}", severity=severity, alert_type=alert_type
+        )
+
+    @app.get("/api/security/summary")
+    async def security_summary() -> list[dict]:
+        return await app.state.db.get_security_summary()
+
+    # --- PR command center endpoint (Issue #33) ---
+
+    @app.get("/api/prs")
+    async def get_open_prs(repo: str | None = Query(None)) -> list[dict]:
+        return await app.state.db.get_open_prs(repo)
+
+    # --- Branch protection endpoint (Issue #34) ---
+
+    @app.get("/api/repos/{owner}/{repo}/branches")
+    async def get_branches(owner: str, repo: str) -> list[dict]:
+        return await app.state.db.get_branches(f"{owner}/{repo}")
 
     return app

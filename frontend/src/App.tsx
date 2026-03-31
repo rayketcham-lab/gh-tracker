@@ -14,11 +14,20 @@ import VisitorsTable from './components/VisitorsTable'
 import VisitorDrilldown from './components/VisitorDrilldown'
 import PeoplePanel from './components/PeoplePanel'
 import IssuesPanel from './components/IssuesPanel'
+import SocialMentionsPanel from './components/SocialMentionsPanel'
 import RepoHeader from './components/RepoHeader'
 import CommitHeatmap from './components/CommitHeatmap'
 import CodeFrequencyChart from './components/CodeFrequencyChart'
 import LanguageChart from './components/LanguageChart'
 import ReleasesPanel from './components/ReleasesPanel'
+import ActivityFeed from './components/ActivityFeed'
+import BotDetectionBadge from './components/BotDetectionBadge'
+import EnrichmentBadges from './components/EnrichmentBadges'
+import RepoOverview from './components/RepoOverview'
+import WorkflowRuns from './components/WorkflowRuns'
+import SecurityAlerts from './components/SecurityAlerts'
+import PRCenter from './components/PRCenter'
+import BranchList from './components/BranchList'
 
 interface VisitorSummary {
   repo_name: string
@@ -30,6 +39,7 @@ interface VisitorSummary {
 function App() {
   const [selectedRepo, setSelectedRepo] = useState<string>('')
   const [drilldownRepo, setDrilldownRepo] = useState<string | null>(null)
+  const [showExport, setShowExport] = useState(false)
 
   const { data: repos = [], isLoading: reposLoading } = useQuery({
     queryKey: ['repos'],
@@ -157,6 +167,51 @@ function App() {
             </a>
           )}
 
+          {/* Export dropdown */}
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setShowExport(!showExport)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 10, padding: '8px 14px',
+                color: 'var(--text-secondary)',
+                fontSize: 12, fontWeight: 500,
+                cursor: 'pointer',
+              }}
+            >
+              <Download size={13} />
+              Export
+            </button>
+            {showExport && (
+              <div style={{
+                position: 'absolute', top: '100%', right: 0, marginTop: 4,
+                background: 'var(--bg-card)', border: '1px solid var(--border-color)',
+                borderRadius: 10, padding: 4, minWidth: 160, zIndex: 100,
+              }}>
+                {[
+                  { label: 'Traffic CSV', url: '/api/export/traffic?format=csv' },
+                  { label: 'Traffic JSON', url: '/api/export/traffic?format=json' },
+                  { label: 'People CSV', url: '/api/export/people?format=csv' },
+                  { label: 'People JSON', url: '/api/export/people?format=json' },
+                ].map(opt => (
+                  <a key={opt.label} href={opt.url} download
+                    style={{
+                      display: 'block', padding: '8px 12px', color: 'var(--text-secondary)',
+                      fontSize: 12, textDecoration: 'none', borderRadius: 6,
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = 'rgba(6,182,212,0.1)'; e.currentTarget.style.color = '#22d3ee' }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)' }}
+                    onClick={() => setShowExport(false)}
+                  >
+                    {opt.label}
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,
             background: 'rgba(16, 185, 129, 0.1)',
@@ -173,6 +228,15 @@ function App() {
 
       {/* Main Content */}
       <main style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+
+        {/* Row 0: Open PRs across all repos */}
+        <PRCenter />
+
+        {/* Row 0: Cross-Repo Overview */}
+        <RepoOverview onSelectRepo={(repo) => {
+          setSelectedRepo(repo)
+          setDrilldownRepo(repo)
+        }} />
 
         {/* Row 1: KPI Cards */}
         <div style={{
@@ -222,8 +286,12 @@ function App() {
         {/* Row 3b: Drill-down — visitor breakdown + people panel */}
         {drilldownRepo && (
           <>
-            {/* Drill-down row 0: Repo metadata header */}
+            {/* Drill-down row 0: Repo metadata header + badges */}
             <RepoHeader repoName={drilldownRepo} />
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              <BotDetectionBadge owner={drilldownRepo.split('/')[0]} repo={drilldownRepo.split('/')[1]} />
+              <EnrichmentBadges owner={drilldownRepo.split('/')[0]} repo={drilldownRepo.split('/')[1]} />
+            </div>
 
             {/* Drill-down row 0b: Commit heatmap + Code frequency */}
             <div style={{
@@ -261,7 +329,43 @@ function App() {
               <IssuesPanel repoName={drilldownRepo} />
             </div>
 
-            {/* Drill-down row 3: Language chart + Releases side by side */}
+            {/* Drill-down row 3: Social Mentions (full width) */}
+            <div style={{ marginBottom: 16 }}>
+              <SocialMentionsPanel repoName={drilldownRepo} />
+            </div>
+
+            {/* Drill-down row 3b: CI/Actions + Activity Feed */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 16,
+              marginBottom: 16,
+            }}>
+              <WorkflowRuns
+                owner={drilldownRepo.split('/')[0]}
+                repo={drilldownRepo.split('/')[1]}
+              />
+              <ActivityFeed />
+            </div>
+
+            {/* Drill-down row 3c: Security + Branches */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 16,
+              marginBottom: 16,
+            }}>
+              <SecurityAlerts
+                owner={drilldownRepo.split('/')[0]}
+                repo={drilldownRepo.split('/')[1]}
+              />
+              <BranchList
+                owner={drilldownRepo.split('/')[0]}
+                repo={drilldownRepo.split('/')[1]}
+              />
+            </div>
+
+            {/* Drill-down row 4: Language chart + Releases side by side */}
             <div style={{
               display: 'grid',
               gridTemplateColumns: '1fr 1fr',

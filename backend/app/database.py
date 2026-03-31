@@ -261,6 +261,35 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_workflow_runs_repo ON workflow_runs(repo_name);
             CREATE INDEX IF NOT EXISTS idx_punch_card_repo ON punch_card(repo_name);
             CREATE INDEX IF NOT EXISTS idx_participation_repo ON participation(repo_name);
+
+            CREATE TABLE IF NOT EXISTS tracked_repos (
+                repo_name TEXT PRIMARY KEY,
+                added_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS security_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_name TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'open',
+                package_name TEXT DEFAULT '',
+                description TEXT DEFAULT '',
+                url TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                dismissed_at TEXT DEFAULT '',
+                UNIQUE(repo_name, alert_type, url)
+            );
+            CREATE INDEX IF NOT EXISTS idx_security_alerts_repo ON security_alerts(repo_name);
+
+            CREATE TABLE IF NOT EXISTS branches (
+                repo_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                protected INTEGER DEFAULT 0,
+                protection_json TEXT DEFAULT '{}',
+                UNIQUE(repo_name, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_branches_repo ON branches(repo_name);
         """)
 
     async def list_tables(self) -> list[str]:
@@ -337,7 +366,35 @@ class Database:
 
     async def list_repos(self) -> list[str]:
         cursor = await self._db.execute(
-            "SELECT DISTINCT repo_name FROM daily_metrics ORDER BY repo_name"
+            "SELECT repo_name FROM tracked_repos "
+            "UNION "
+            "SELECT DISTINCT repo_name FROM daily_metrics "
+            "ORDER BY repo_name"
+        )
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+    async def add_tracked_repo(self, repo_name: str) -> None:
+        """Add a repo to tracked_repos. Silently ignores duplicates."""
+        await self._db.execute(
+            "INSERT OR IGNORE INTO tracked_repos (repo_name) VALUES (?)",
+            (repo_name,),
+        )
+        await self._db.commit()
+
+    async def remove_tracked_repo(self, repo_name: str) -> bool:
+        """Remove a repo from tracked_repos. Returns True if a row was deleted."""
+        cursor = await self._db.execute(
+            "DELETE FROM tracked_repos WHERE repo_name = ?",
+            (repo_name,),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def get_tracked_repos(self) -> list[str]:
+        """Return repos explicitly added via the management API."""
+        cursor = await self._db.execute(
+            "SELECT repo_name FROM tracked_repos ORDER BY repo_name"
         )
         rows = await cursor.fetchall()
         return [row[0] for row in rows]
@@ -1164,3 +1221,65 @@ class Database:
             prev_referrers = current_referrers
 
         return result
+
+    async def get_status(self) -> dict:
+        """Return DB file size and row counts for all tables."""
+        import os as _os
+        table_names = [
+            "daily_metrics", "referrers", "popular_paths", "stargazers",
+            "watchers", "forkers", "contributors", "issues", "repo_metadata",
+            "workflow_runs", "social_mentions", "citations", "webhook_events",
+        ]
+        tables = {}
+        for t in table_names:
+            cursor = await self._db.execute(f"SELECT COUNT(*) FROM {t}")
+            row = await cursor.fetchone()
+            tables[t] = row[0] if row else 0
+
+        db_size = _os.path.getsize(self.db_path) if _os.path.exists(self.db_path) else 0
+        return {"db_size_bytes": db_size, "tables": tables}
+
+    async def get_security_alerts(
+        self, repo_name: str, severity: str | None = None, alert_type: str | None = None
+    ) -> list[dict]:
+        query = "SELECT * FROM security_alerts WHERE repo_name = ?"
+        params: list = [repo_name]
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity)
+        if alert_type:
+            query += " AND alert_type = ?"
+            params.append(alert_type)
+        query += " ORDER BY created_at DESC"
+        rows = await self._db.execute_fetchall(query, params)
+        return [dict(r) for r in rows]
+
+    async def get_security_summary(self) -> list[dict]:
+        rows = await self._db.execute_fetchall(
+            """SELECT repo_name,
+               SUM(CASE WHEN severity='critical' THEN 1 ELSE 0 END) as critical,
+               SUM(CASE WHEN severity='high' THEN 1 ELSE 0 END) as high,
+               SUM(CASE WHEN severity='medium' THEN 1 ELSE 0 END) as medium,
+               SUM(CASE WHEN severity='low' THEN 1 ELSE 0 END) as low,
+               COUNT(*) as total
+               FROM security_alerts WHERE state='open'
+               GROUP BY repo_name ORDER BY total DESC"""
+        )
+        return [dict(r) for r in rows]
+
+    async def get_open_prs(self, repo: str | None = None) -> list[dict]:
+        query = "SELECT * FROM issues WHERE is_pr = 1 AND state = 'open'"
+        params: list = []
+        if repo:
+            query += " AND repo_name = ?"
+            params.append(repo)
+        query += " ORDER BY created_at DESC"
+        rows = await self._db.execute_fetchall(query, params)
+        return [dict(r) for r in rows]
+
+    async def get_branches(self, repo_name: str) -> list[dict]:
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM branches WHERE repo_name = ? ORDER BY name",
+            (repo_name,)
+        )
+        return [dict(r) for r in rows]
