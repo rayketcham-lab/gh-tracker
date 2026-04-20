@@ -11,6 +11,12 @@
 
 # gh-tracker
 
+<!-- runners-demo-hero -->
+<p align="center">
+  <img src="docs/runners-demo.gif" alt="gh-tracker dashboard tour: traffic, referrers, and self-hosted runners live view" width="900">
+</p>
+
+
 **Self-hosted GitHub analytics dashboard that captures every metric GitHub exposes — and preserves it forever.**
 
 GitHub's Traffic API permanently deletes data after 14 days.<br>
