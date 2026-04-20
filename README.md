@@ -13,9 +13,11 @@
 
 <!-- runners-demo-hero -->
 <p align="center">
-  <video src="docs/runners-demo.mp4" poster="docs/runners-demo.png" controls muted width="900">
-    <a href="docs/runners-demo.mp4">Watch the dashboard tour (MP4)</a>
-  </video>
+  <a href="docs/runners-demo.mp4">
+    <img src="docs/runners-demo.png" alt="gh-tracker dashboard tour: traffic, referrers, and self-hosted runners live view — click to play MP4" width="900">
+  </a>
+  <br>
+  <sub><em>Click the preview to play the 32-second dashboard tour (MP4, 1.3 MB).</em></sub>
 </p>
 
 
@@ -213,7 +215,7 @@ backend/
     database.py        # SQLite with 15 tables, async via aiosqlite
     main.py            # FastAPI with 46 endpoints
     server_config.py   # Port resolution (GH_TRACKER_PORT, default 50047)
-  tests/               # 146 unit tests (pytest + pytest-httpx)
+  tests/               # 252 unit tests (pytest + pytest-httpx)
   collect_live.py      # CLI entry point for data collection
   run.py               # API server entry point
 
