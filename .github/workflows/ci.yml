@@ -57,8 +57,20 @@ jobs:
       - name: Lint (eslint)
         run: npm run lint
 
+      # Reciprocal guard: enforce that at least one real test file exists.
+      # --passWithNoTests silently passes with zero coverage — this prevents that.
+      - name: Guard — require at least one test file
+        run: |
+          count=$(find src -name '*.test.*' -o -name '*.spec.*' | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: No test files found in frontend/src/ (*.test.* or *.spec.*)"
+            echo "Add at least one real test — do not use --passWithNoTests to dodge this."
+            exit 1
+          fi
+          echo "Found $count test file(s). Proceeding."
+
       - name: Test (vitest)
-        run: npx --yes vitest@1.6.1 run --passWithNoTests --reporter=verbose
+        run: npm test
 
       - name: Build (tsc + vite)
         run: npm run build
@@ -90,5 +102,10 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
+      # --omit=dev audits only production (shipped) dependencies.
+      # The remaining HIGH/CRITICAL advisories (GHSA-67mh-4wv8-2f99 via esbuild ≤0.24.2)
+      # are in the vite/vite-node/vitest dev tooling chain and do NOT ship to users.
+      # Fixing them requires vite@8 (major breaking change). Tracked separately.
+      # Production deps are clean at --audit-level=high.
       - name: Audit npm dependencies
-        run: cd frontend && npm audit --audit-level=critical
+        run: cd frontend && npm audit --omit=dev --audit-level=high
