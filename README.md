@@ -7,6 +7,7 @@
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
 ![Tests](https://img.shields.io/badge/tests-252%20passing-brightgreen)
 ![Endpoints](https://img.shields.io/badge/API%20endpoints-46-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-green)
 
 # gh-tracker
 
