@@ -8,11 +8,18 @@ on:
   schedule:
     - cron: "0 6 * * 1"
 
+# Least privilege by default. Jobs needing more must opt in explicitly.
+permissions:
+  contents: read
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    # Job-level permissions REPLACE the workflow defaults rather than adding to
+    # them, so contents:read has to be repeated here for actions/checkout.
     permissions:
+      contents: read
       security-events: write
 
     strategy:

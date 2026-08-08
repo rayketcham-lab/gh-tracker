@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default. Jobs needing more must opt in explicitly.
+permissions:
+  contents: read
+
 jobs:
   backend:
     name: Backend (lint + test)
@@ -57,8 +61,21 @@ jobs:
       - name: Lint (eslint)
         run: npm run lint
 
+      # Guard: --passWithNoTests reports success against zero test files, which
+      # is how this suite was previously green while asserting nothing. Fail
+      # loudly if the test files ever disappear.
+      - name: Guard — require at least one frontend test file
+        run: |
+          count=$(find src \( -name '*.test.*' -o -name '*.spec.*' \) | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: no test files in frontend/src (*.test.* or *.spec.*)."
+            echo "Add a real test — do not rely on --passWithNoTests."
+            exit 1
+          fi
+          echo "Found $count test file(s)."
+
       - name: Test (vitest)
-        run: npm test -- --passWithNoTests --reporter=verbose
+        run: npm test -- --reporter=verbose
 
       - name: Build (tsc + vite)
         run: npm run build
@@ -90,5 +107,16 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
-      - name: Audit npm dependencies
+      # Two gates, deliberately. The audit level was once raised from high to
+      # critical to stop a real high-severity ReDoS from failing the build;
+      # splitting the gate removes the incentive to do that again.
+      #
+      # 1. Everything users actually receive, held to HIGH. Currently clean.
+      - name: Audit npm dependencies (production, high)
+        run: cd frontend && npm audit --omit=dev --audit-level=high
+
+      # 2. Build tooling, held to CRITICAL. Dev dependencies are not shipped,
+      #    but a critical there still means a compromised build. Keeping this
+      #    gate is what surfaced the vitest advisories.
+      - name: Audit npm dependencies (including dev, critical)
         run: cd frontend && npm audit --audit-level=critical
