@@ -47,7 +47,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
@@ -58,7 +58,7 @@ jobs:
         run: npm run lint
 
       - name: Test (vitest)
-        run: npx --yes vitest@1.6.1 run --passWithNoTests --reporter=verbose
+        run: npm test -- --passWithNoTests --reporter=verbose
 
       - name: Build (tsc + vite)
         run: npm run build
@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 

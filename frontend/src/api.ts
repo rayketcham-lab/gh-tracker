@@ -63,3 +63,37 @@ export function parseRepo(fullName: string): { owner: string; repo: string } {
   }
   return { owner: parts[0], repo: parts[1] };
 }
+
+export interface DashboardRepo {
+  repo_name: string;
+  views_30d: number;
+  unique_visitors_30d: number;
+  clones_30d: number;
+  stars: number;
+  forks: number;
+  trend: number | null;
+}
+
+export interface DashboardDayTotal {
+  date: string;
+  views: number;
+  clones: number;
+}
+
+export interface DashboardData {
+  total_repos: number;
+  total_views: number;
+  total_unique_visitors: number;
+  total_clones: number;
+  total_stars: number;
+  total_forks: number;
+  top_referrer: string | null;
+  repos: DashboardRepo[];
+  daily_totals: DashboardDayTotal[];
+}
+
+export async function fetchDashboard(): Promise<DashboardData> {
+  const resp = await fetch('/api/dashboard');
+  if (!resp.ok) throw new Error('Failed to fetch dashboard');
+  return resp.json();
+}

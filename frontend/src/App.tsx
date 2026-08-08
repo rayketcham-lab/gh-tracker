@@ -28,6 +28,8 @@ import WorkflowRuns from './components/WorkflowRuns'
 import SecurityAlerts from './components/SecurityAlerts'
 import PRCenter from './components/PRCenter'
 import BranchList from './components/BranchList'
+import DashboardOverview from './components/DashboardOverview'
+import RunnersPanel from './components/RunnersPanel'
 
 interface VisitorSummary {
   repo_name: string
@@ -37,7 +39,7 @@ interface VisitorSummary {
 }
 
 function App() {
-  const [selectedRepo, setSelectedRepo] = useState<string>('')
+  const [selectedRepo, setSelectedRepo] = useState<string>('__overview__')
   const [drilldownRepo, setDrilldownRepo] = useState<string | null>(null)
   const [showExport, setShowExport] = useState(false)
 
@@ -46,7 +48,9 @@ function App() {
     queryFn: fetchRepos,
   })
 
-  const activeRepo = selectedRepo || repos[0] || ''
+  const isOverview = selectedRepo === '__overview__'
+  const isRunners = selectedRepo === '__runners__'
+  const activeRepo = isOverview || isRunners ? '' : (selectedRepo || repos[0] || '')
   const parsed = activeRepo ? parseRepo(activeRepo) : { owner: '', repo: '' }
 
   const { data: traffic = [], isLoading: trafficLoading } = useQuery({
@@ -111,7 +115,11 @@ function App() {
           <div style={{ position: 'relative' }}>
             <select
               value={activeRepo}
-              onChange={(e) => setSelectedRepo(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value
+                setSelectedRepo(v)
+                setDrilldownRepo(v === '__overview__' || v === '__runners__' ? null : v)
+              }}
               style={{
                 appearance: 'none',
                 background: 'var(--bg-card)',
@@ -127,6 +135,8 @@ function App() {
               }}
             >
               {reposLoading && <option>Loading...</option>}
+              <option value="__overview__">📊 Overview</option>
+              <option value="__runners__">🏃 Runners (live)</option>
               {repos.length === 0 && !reposLoading && <option>No repos tracked</option>}
               {repos.map(r => (
                 <option key={r} value={r}>{r}</option>
@@ -229,6 +239,12 @@ function App() {
       {/* Main Content */}
       <main style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
 
+        {isOverview ? (
+          <DashboardOverview />
+        ) : isRunners ? (
+          <RunnersPanel />
+        ) : (
+          <>
         {/* Row 0: Open PRs across all repos */}
         <PRCenter />
 
@@ -385,6 +401,9 @@ function App() {
         <div style={{ marginBottom: 24 }}>
           <PopularPaths data={paths} loading={pathsLoading} />
         </div>
+
+                  </>
+        )}
 
         {/* Footer */}
         <footer style={{

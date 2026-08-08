@@ -1,17 +1,23 @@
 """FastAPI application for the GitHub analytics dashboard."""
 
+import asyncio
 import csv
 import hashlib
 import hmac
 import io
 import json
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 from app.database import Database
+from app.runner_probe import probe_runner
+from app.runner_stuck import evaluate_stuck
+from app.runners_config import load_config as load_runners_config
 
 
 class RepoAddRequest(BaseModel):
@@ -33,6 +39,11 @@ def create_app(db: Database | None = None) -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+
+    @app.get("/api/dashboard")
+    async def get_dashboard() -> dict:
+        return await app.state.db.get_dashboard_summary()
 
     @app.get("/api/repos")
     async def list_repos() -> list[str]:
@@ -545,5 +556,63 @@ def create_app(db: Database | None = None) -> FastAPI:
     @app.get("/api/repos/{owner}/{repo}/branches")
     async def get_branches(owner: str, repo: str) -> list[dict]:
         return await app.state.db.get_branches(f"{owner}/{repo}")
+
+    # --- Self-hosted runner live pane (local-only, no webhooks) ---
+
+    runners_cfg = load_runners_config()
+
+    async def _collect_runner_states() -> list[dict]:
+        probes = await asyncio.gather(
+            *(probe_runner(r) for r in runners_cfg.runners),
+            return_exceptions=True,
+        )
+        out: list[dict] = []
+        for r, state in zip(runners_cfg.runners, probes, strict=True):
+            if isinstance(state, BaseException):
+                out.append({
+                    "name": r.name, "kind": r.kind,
+                    "host": r.ssh_host if r.kind == "ssh" else "local",
+                    "reachable": False, "error": str(state)[:500],
+                    "stuck": {"flagged": False, "reasons": [], "status": "unreachable"},
+                })
+                continue
+            state["stuck"] = evaluate_stuck(state, runners_cfg.rules)
+            out.append(state)
+        return out
+
+    @app.get("/api/runners/state")
+    async def runners_state() -> dict:
+        return {
+            "runners": await _collect_runner_states(),
+            "rules": {
+                "workerAgeMinutes": runners_cfg.rules.worker_age_minutes,
+                "logSilenceSeconds": runners_cfg.rules.log_silence_seconds,
+                "lowCpuPercent": runners_cfg.rules.low_cpu_percent,
+            },
+            "pollIntervalMs": runners_cfg.poll_interval_ms,
+        }
+
+    @app.get("/api/runners/stream")
+    async def runners_stream() -> StreamingResponse:
+        interval = max(1.0, runners_cfg.poll_interval_ms / 1000.0)
+
+        async def gen():
+            while True:
+                states = await _collect_runner_states()
+                payload = json.dumps({"runners": states})
+                yield f"data: {payload}\n\n"
+                await asyncio.sleep(interval)
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Serve built frontend (vite `dist/`) at the root. API routes above take
+    # precedence; everything else falls through to the SPA's index.html.
+    dist_dir = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if dist_dir.is_dir():
+        app.mount("/", StaticFiles(directory=dist_dir, html=True), name="frontend")
 
     return app

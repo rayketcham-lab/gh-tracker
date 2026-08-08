@@ -17,7 +17,10 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25.0",
     "pytest-httpx>=0.35.0",
-    "ruff>=0.9.0",
+    # Upper-bounded on purpose: ruff's rule set changes between minor releases,
+    # so an unbounded spec makes CI lint results depend on when it happens to
+    # run rather than on the code. Bump deliberately.
+    "ruff>=0.9.0,<0.17",
 ]
 
 [tool.pytest.ini_options]
@@ -30,3 +33,11 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# runner_probe.py embeds a bash script as a raw string. Four of its lines
+# exceed the limit and cannot be wrapped: the JSON emitted inside the heredoc
+# must stay on one physical line, and the `read ... < <(...)` process
+# substitution breaks if split. `# noqa` is not usable inside a string literal,
+# so the exemption has to live here. Applies to E501 only.
+"app/runner_probe.py" = ["E501"]

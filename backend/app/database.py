@@ -1283,3 +1283,129 @@ class Database:
             (repo_name,)
         )
         return [dict(r) for r in rows]
+
+    async def get_dashboard_summary(self) -> dict:
+        """Return a cross-repo dashboard summary.
+
+        Aggregates traffic, stars, forks, referrers, and daily totals across
+        all tracked repos. Trend is computed as the % change in views between
+        the most recent 30-day window and the prior 30-day window, relative to
+        the latest date available for each repo.
+        """
+        # --- Global totals from daily_metrics ---
+        cursor = await self._db.execute(
+            "SELECT COUNT(DISTINCT repo_name) AS total_repos, "
+            "       COALESCE(SUM(views), 0) AS total_views, "
+            "       COALESCE(SUM(unique_visitors), 0) AS total_unique_visitors, "
+            "       COALESCE(SUM(clones), 0) AS total_clones "
+            "FROM daily_metrics"
+        )
+        totals_row = dict(await cursor.fetchone())
+
+        # --- Star / fork counts (global and per-repo, single query each) ---
+        # Sourced from repo_metadata, which stores GitHub's authoritative
+        # stargazers_count / forks_count. Counting rows in the stargazers and
+        # forkers tables is wrong in both directions: those collectors fetch a
+        # single unpaginated page (capping at 30), and they only ever INSERT, so
+        # anyone who unstars or deletes a fork lingers as a stale row.
+        cursor = await self._db.execute(
+            "SELECT COALESCE(SUM(stars), 0), COALESCE(SUM(forks), 0) FROM repo_metadata"
+        )
+        totals = await cursor.fetchone()
+        total_stars = totals[0]
+        total_forks = totals[1]
+
+        # Pre-load per-repo star / fork counts to avoid N extra queries in the loop
+        cursor = await self._db.execute(
+            "SELECT repo_name, stars, forks FROM repo_metadata"
+        )
+        meta_rows = await cursor.fetchall()
+        stars_by_repo: dict[str, int] = {row[0]: row[1] or 0 for row in meta_rows}
+        forks_by_repo: dict[str, int] = {row[0]: row[2] or 0 for row in meta_rows}
+
+        # --- Top referrer across all repos ---
+        cursor = await self._db.execute(
+            "SELECT referrer, SUM(views) AS total_views "
+            "FROM referrers "
+            "GROUP BY referrer "
+            "ORDER BY total_views DESC "
+            "LIMIT 1"
+        )
+        ref_row = await cursor.fetchone()
+        top_referrer = ref_row[0] if ref_row else None
+
+        # --- Daily totals aggregated across repos ---
+        cursor = await self._db.execute(
+            "SELECT date, SUM(views) AS views, SUM(clones) AS clones "
+            "FROM daily_metrics "
+            "GROUP BY date "
+            "ORDER BY date ASC"
+        )
+        daily_totals = [
+            {"date": row["date"], "views": row["views"], "clones": row["clones"]}
+            for row in await cursor.fetchall()
+        ]
+
+        # --- Per-repo max date (bulk, avoids N queries) ---
+        cursor = await self._db.execute(
+            "SELECT repo_name, MAX(date) AS max_date "
+            "FROM daily_metrics "
+            "GROUP BY repo_name "
+            "ORDER BY repo_name"
+        )
+        repo_max_dates: dict[str, str] = {
+            row[0]: row[1] for row in await cursor.fetchall()
+        }
+
+        # --- Per-repo 30-day metrics and trend ---
+        repos = []
+        for repo_name, max_date in repo_max_dates.items():
+            # Current 30d window: [max_date - 29 days, max_date]
+            cursor = await self._db.execute(
+                "SELECT COALESCE(SUM(views), 0) AS views, "
+                "       COALESCE(SUM(unique_visitors), 0) AS unique_visitors, "
+                "       COALESCE(SUM(clones), 0) AS clones "
+                "FROM daily_metrics "
+                "WHERE repo_name = ? "
+                "  AND date BETWEEN date(?, '-29 days') AND ?",
+                (repo_name, max_date, max_date),
+            )
+            curr_row = dict(await cursor.fetchone())
+
+            # Prior 30d window: [max_date - 59 days, max_date - 30 days]
+            cursor = await self._db.execute(
+                "SELECT COALESCE(SUM(views), 0) AS prior_views "
+                "FROM daily_metrics "
+                "WHERE repo_name = ? "
+                "  AND date BETWEEN date(?, '-59 days') AND date(?, '-30 days')",
+                (repo_name, max_date, max_date),
+            )
+            prior_views = (await cursor.fetchone())[0]
+
+            # Trend: percent change; null when no prior data
+            if prior_views > 0:
+                trend = round((curr_row["views"] - prior_views) / prior_views * 100, 2)
+            else:
+                trend = None
+
+            repos.append({
+                "repo_name": repo_name,
+                "views_30d": curr_row["views"],
+                "unique_visitors_30d": curr_row["unique_visitors"],
+                "clones_30d": curr_row["clones"],
+                "stars": stars_by_repo.get(repo_name, 0),
+                "forks": forks_by_repo.get(repo_name, 0),
+                "trend": trend,
+            })
+
+        return {
+            "total_repos": totals_row["total_repos"],
+            "total_views": totals_row["total_views"],
+            "total_unique_visitors": totals_row["total_unique_visitors"],
+            "total_clones": totals_row["total_clones"],
+            "total_stars": total_stars,
+            "total_forks": total_forks,
+            "top_referrer": top_referrer,
+            "repos": repos,
+            "daily_totals": daily_totals,
+        }
