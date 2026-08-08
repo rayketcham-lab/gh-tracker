@@ -331,17 +331,17 @@ class TestMultiRepoCollection:
             )
             # People endpoints (4)
             httpx_mock.add_response(
-                url=f"https://api.github.com/repos/owner/{repo}/stargazers",
+                url=f"https://api.github.com/repos/owner/{repo}/stargazers?per_page=100",
                 json=[],
                 headers={"X-RateLimit-Remaining": "4986"},
             )
             httpx_mock.add_response(
-                url=f"https://api.github.com/repos/owner/{repo}/subscribers",
+                url=f"https://api.github.com/repos/owner/{repo}/subscribers?per_page=100",
                 json=[],
                 headers={"X-RateLimit-Remaining": "4985"},
             )
             httpx_mock.add_response(
-                url=f"https://api.github.com/repos/owner/{repo}/forks?sort=newest",
+                url=f"https://api.github.com/repos/owner/{repo}/forks?sort=newest&per_page=100",
                 json=[],
                 headers={"X-RateLimit-Remaining": "4984"},
             )
@@ -353,7 +353,7 @@ class TestMultiRepoCollection:
             # Issues endpoints (2: open + closed)
             for state in ("open", "closed"):
                 httpx_mock.add_response(
-                    url=f"https://api.github.com/repos/owner/{repo}/issues?state={state}&per_page=30&sort=updated",
+                    url=f"https://api.github.com/repos/owner/{repo}/issues?state={state}&sort=updated&per_page=100",
                     json=[],
                     headers={"X-RateLimit-Remaining": "4982"},
                 )

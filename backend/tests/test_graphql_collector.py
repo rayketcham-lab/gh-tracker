@@ -189,17 +189,17 @@ class TestCollectGraphqlSummary:
         )
         # People
         httpx_mock.add_response(
-            url="https://api.github.com/repos/owner/myrepo/stargazers",
+            url="https://api.github.com/repos/owner/myrepo/stargazers?per_page=100",
             json=[],
             headers={"X-RateLimit-Remaining": "4995"},
         )
         httpx_mock.add_response(
-            url="https://api.github.com/repos/owner/myrepo/subscribers",
+            url="https://api.github.com/repos/owner/myrepo/subscribers?per_page=100",
             json=[],
             headers={"X-RateLimit-Remaining": "4994"},
         )
         httpx_mock.add_response(
-            url="https://api.github.com/repos/owner/myrepo/forks?sort=newest",
+            url="https://api.github.com/repos/owner/myrepo/forks?sort=newest&per_page=100",
             json=[],
             headers={"X-RateLimit-Remaining": "4993"},
         )
@@ -211,7 +211,7 @@ class TestCollectGraphqlSummary:
         # Issues
         for state in ("open", "closed"):
             httpx_mock.add_response(
-                url=f"https://api.github.com/repos/owner/myrepo/issues?state={state}&per_page=30&sort=updated",
+                url=f"https://api.github.com/repos/owner/myrepo/issues?state={state}&sort=updated&per_page=100",
                 json=[],
                 headers={"X-RateLimit-Remaining": "4991"},
             )

@@ -574,6 +574,49 @@ class Database:
         )
         return [dict(row) for row in await cursor.fetchall()]
 
+    async def _reconcile_usernames(
+        self, table: str, repo_name: str, current: list[str]
+    ) -> int:
+        """Delete rows for users no longer present upstream. Returns rows removed.
+
+        The collectors only ever INSERT, so without this anyone who unstars,
+        unwatches, or deletes a fork lingers forever and inflates every count
+        derived from these tables.
+
+        `current` must come from a complete, successful fetch — passing a
+        partial page would delete real rows. An empty list is meaningful and
+        legitimately clears the table for that repo.
+        """
+        if table not in {"stargazers", "watchers", "forkers"}:
+            raise ValueError(f"refusing to reconcile unknown table: {table}")
+
+        if current:
+            placeholders = ",".join("?" for _ in current)
+            sql = (
+                f"DELETE FROM {table} WHERE repo_name = ? "  # noqa: S608 - table is allow-listed above
+                f"AND username NOT IN ({placeholders})"
+            )
+            params: tuple = (repo_name, *current)
+        else:
+            sql = f"DELETE FROM {table} WHERE repo_name = ?"  # noqa: S608
+            params = (repo_name,)
+
+        cursor = await self._db.execute(sql, params)
+        await self._db.commit()
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+    async def reconcile_stargazers(self, repo_name: str, current: list[str]) -> int:
+        """Drop stored stargazers who no longer star the repo."""
+        return await self._reconcile_usernames("stargazers", repo_name, current)
+
+    async def reconcile_watchers(self, repo_name: str, current: list[str]) -> int:
+        """Drop stored watchers who no longer watch the repo."""
+        return await self._reconcile_usernames("watchers", repo_name, current)
+
+    async def reconcile_forkers(self, repo_name: str, current: list[str]) -> int:
+        """Drop stored forkers whose fork no longer exists."""
+        return await self._reconcile_usernames("forkers", repo_name, current)
+
     # --- People: Watchers ---
 
     async def upsert_watcher(self, repo_name: str, username: str) -> None:

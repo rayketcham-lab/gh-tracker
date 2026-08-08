@@ -9,7 +9,7 @@ Specs covered:
 6. Empty repo returns empty list for both endpoints
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -85,10 +85,10 @@ class TestDetectWatcherChanges:
         # DB has no watchers initially
 
         collector = GitHubCollector(token="tok", db=db, repos=[repo])
-        mock_response = MagicMock()
-        mock_response.json.return_value = [{"login": "alice"}]
 
-        with patch.object(collector, "_request", new=AsyncMock(return_value=mock_response)):
+        with patch.object(
+            collector, "_paginate", new=AsyncMock(return_value=[{"login": "alice"}])
+        ):
             await collector.detect_watcher_changes(repo)
 
         # alice should now be in watchers table
@@ -108,11 +108,11 @@ class TestDetectWatcherChanges:
         await db.upsert_watcher(repo, "bob")
 
         collector = GitHubCollector(token="tok", db=db, repos=[repo])
-        # GitHub now only returns alice — bob has un-watched
-        mock_response = MagicMock()
-        mock_response.json.return_value = [{"login": "alice"}]
 
-        with patch.object(collector, "_request", new=AsyncMock(return_value=mock_response)):
+        # GitHub now only returns alice — bob has un-watched
+        with patch.object(
+            collector, "_paginate", new=AsyncMock(return_value=[{"login": "alice"}])
+        ):
             await collector.detect_watcher_changes(repo)
 
         changes = await db.get_watcher_changes(repo)
@@ -126,10 +126,10 @@ class TestDetectWatcherChanges:
         await db.upsert_watcher(repo, "alice")
 
         collector = GitHubCollector(token="tok", db=db, repos=[repo])
-        mock_response = MagicMock()
-        mock_response.json.return_value = [{"login": "alice"}]
 
-        with patch.object(collector, "_request", new=AsyncMock(return_value=mock_response)):
+        with patch.object(
+            collector, "_paginate", new=AsyncMock(return_value=[{"login": "alice"}])
+        ):
             await collector.detect_watcher_changes(repo)
 
         changes = await db.get_watcher_changes(repo)
@@ -137,17 +137,25 @@ class TestDetectWatcherChanges:
 
         await collector.close()
 
-    async def test_none_response_is_handled_gracefully(self, db):
-        """If the API returns None (304/202), no crash and no changes stored."""
+    async def test_failed_fetch_records_no_changes(self, db):
+        """A failed fetch must not be read as "everyone left".
+
+        _paginate raises rather than returning a partial list, precisely so a
+        network or API failure cannot be mistaken for an empty watcher set and
+        turned into a pile of fabricated 'removed' events.
+        """
         repo = "owner/repo"
         await db.upsert_watcher(repo, "alice")
 
         collector = GitHubCollector(token="tok", db=db, repos=[repo])
-        with patch.object(collector, "_request", new=AsyncMock(return_value=None)):
-            await collector.detect_watcher_changes(repo)
+        with patch.object(
+            collector, "_paginate", new=AsyncMock(side_effect=RuntimeError("boom"))
+        ):
+            with pytest.raises(RuntimeError):
+                await collector.detect_watcher_changes(repo)
 
-        changes = await db.get_watcher_changes(repo)
-        assert changes == []
+        assert await db.get_watcher_changes(repo) == []
+        assert len(await db.get_watchers(repo)) == 1
 
         await collector.close()
 

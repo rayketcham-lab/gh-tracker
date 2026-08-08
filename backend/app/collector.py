@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import UTC, datetime
 
 import httpx
@@ -18,6 +19,18 @@ GITHUB_API = "https://api.github.com"
 RATE_LIMIT_FLOOR = 50  # Stop making requests below this threshold
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0  # seconds
+PER_PAGE = 100  # GitHub's maximum; default is 30
+MAX_PAGINATED_ITEMS = 10_000  # Backstop so one huge repo cannot exhaust the budget
+
+_LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
+
+
+def _next_page_url(link_header: str) -> str | None:
+    """Return the rel="next" URL from a Link header, or None when exhausted."""
+    if not link_header:
+        return None
+    match = _LINK_NEXT_RE.search(link_header)
+    return match.group(1) if match else None
 
 
 class RateLimitError(Exception):
@@ -164,50 +177,98 @@ class GitHubCollector:
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         await self.db.store_paths(repo, today, data)
 
+    async def _paginate(
+        self, url: str, headers: dict | None = None
+    ) -> list[dict]:
+        """Fetch every page of a list endpoint.
+
+        GitHub returns 30 items per page by default and exposes the next page
+        through the Link header. Collecting only the first page silently
+        truncates stargazers, watchers, forkers and issues at 30.
+
+        Raises on HTTP errors so callers can distinguish "the repo really has
+        no members" from "the request failed" — reconciliation must never run
+        on a partial result.
+        """
+        items: list[dict] = []
+        separator = "&" if "?" in url else "?"
+        next_url: str | None = f"{url}{separator}per_page={PER_PAGE}"
+
+        while next_url:
+            self._check_rate_limit()
+            client = await self._get_client()
+            response = await client.get(next_url, headers=headers or {})
+            self._update_rate_limit(response)
+            response.raise_for_status()
+
+            page = response.json()
+            if not isinstance(page, list):
+                break
+            items.extend(page)
+
+            next_url = _next_page_url(response.headers.get("Link", ""))
+            if len(items) >= MAX_PAGINATED_ITEMS:
+                logger.warning(
+                    "Stopping pagination for %s at %d items (cap %d)",
+                    url, len(items), MAX_PAGINATED_ITEMS,
+                )
+                break
+
+        return items
+
     async def collect_stargazers(self, repo: str) -> None:
-        """Collect stargazers with timestamps."""
-        url = f"{GITHUB_API}/repos/{repo}/stargazers"
-        self._check_rate_limit()
-        client = await self._get_client()
-        # Need star+json accept header for timestamps
-        response = await client.get(
-            url,
+        """Collect stargazers with timestamps, then drop anyone who unstarred."""
+        # star+json accept header is what makes starred_at available.
+        stars = await self._paginate(
+            f"{GITHUB_API}/repos/{repo}/stargazers",
             headers={"Accept": "application/vnd.github.star+json"},
         )
-        self._update_rate_limit(response)
-        response.raise_for_status()
 
-        for star in response.json():
+        current: list[str] = []
+        for star in stars:
             user = star.get("user", {})
             username = user.get("login", "")
             starred_at = star.get("starred_at", "")
             if username:
                 await self.db.upsert_stargazer(repo, username, starred_at)
+                current.append(username)
+
+        removed = await self.db.reconcile_stargazers(repo, current)
+        if removed:
+            logger.info("Removed %d stale stargazer(s) for %s", removed, repo)
 
     async def collect_watchers(self, repo: str) -> None:
-        """Collect watchers (subscribers)."""
-        url = f"{GITHUB_API}/repos/{repo}/subscribers"
-        response = await self._request(url)
-        if response is None:
-            return
-        for user in response.json():
+        """Collect watchers (subscribers), then drop anyone who unwatched."""
+        users = await self._paginate(f"{GITHUB_API}/repos/{repo}/subscribers")
+
+        current: list[str] = []
+        for user in users:
             username = user.get("login", "")
             if username:
                 await self.db.upsert_watcher(repo, username)
+                current.append(username)
+
+        removed = await self.db.reconcile_watchers(repo, current)
+        if removed:
+            logger.info("Removed %d stale watcher(s) for %s", removed, repo)
 
     async def collect_forkers(self, repo: str) -> None:
-        """Collect forks with owner info."""
-        url = f"{GITHUB_API}/repos/{repo}/forks?sort=newest"
-        response = await self._request(url)
-        if response is None:
-            return
-        for fork in response.json():
+        """Collect forks with owner info, then drop deleted forks."""
+        forks = await self._paginate(f"{GITHUB_API}/repos/{repo}/forks?sort=newest")
+
+        current: list[str] = []
+        for fork in forks:
             owner = fork.get("owner", {})
             username = owner.get("login", "")
             fork_name = fork.get("full_name", "")
             forked_at = fork.get("created_at", "")
             if username:
                 await self.db.upsert_forker(repo, username, fork_name, forked_at)
+                current.append(username)
+
+        removed = await self.db.reconcile_forkers(repo, current)
+        if removed:
+            logger.info("Removed %d stale forker(s) for %s", removed, repo)
 
     async def collect_contributors(self, repo: str) -> None:
         """Collect contributors with commit stats."""
@@ -393,11 +454,9 @@ class GitHubCollector:
     async def collect_issues(self, repo: str) -> None:
         """Collect open and recently closed issues and PRs."""
         for state in ("open", "closed"):
-            url = f"{GITHUB_API}/repos/{repo}/issues?state={state}&per_page=30&sort=updated"
-            response = await self._request(url)
-            if response is None:
-                continue
-            for item in response.json():
+            url = f"{GITHUB_API}/repos/{repo}/issues?state={state}&sort=updated"
+            items = await self._paginate(url)
+            for item in items:
                 is_pr = "pull_request" in item
                 user = item.get("user", {})
                 label_names = ",".join(
@@ -592,15 +651,17 @@ class GitHubCollector:
             logger.warning("Could not collect Libraries.io data for %s", repo)
 
     async def detect_watcher_changes(self, repo: str) -> None:
-        """Compare current watchers on GitHub against the DB, storing additions/removals."""
-        url = f"{GITHUB_API}/repos/{repo}/subscribers"
-        response = await self._request(url)
-        if response is None:
-            return
+        """Compare current watchers on GitHub against the DB, storing additions/removals.
+
+        Must use the full paginated list. Diffing the stored watchers against a
+        single 30-item page reports everyone beyond the first page as "removed"
+        on every run, fabricating removal events that never happened.
+        """
+        users = await self._paginate(f"{GITHUB_API}/repos/{repo}/subscribers")
 
         current_usernames = {
             user.get("login", "")
-            for user in response.json()
+            for user in users
             if user.get("login")
         }
 
