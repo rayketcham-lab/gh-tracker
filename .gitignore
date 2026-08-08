@@ -15,6 +15,7 @@ venv/
 .coverage
 htmlcov/
 .mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules/
@@ -24,10 +25,15 @@ frontend/dist/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/*.db.bak-*
 
 # Environment
 .env
 .env.*
+
+# Local runner topology: hostnames, paths and systemd unit names are
+# operator-specific. Point GH_TRACKER_RUNNERS_CONFIG at this file.
+runners.json
 
 # IDE
 .vscode/

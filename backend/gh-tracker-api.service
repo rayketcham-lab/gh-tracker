@@ -1,0 +1,19 @@
+[Unit]
+Description=gh-tracker API (FastAPI + live runner pane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pleb
+WorkingDirectory=/opt/gh-tracker/backend
+Environment=GH_TRACKER_PORT=50047
+Environment=GH_TRACKER_PUBLIC_ONLY=true
+ExecStart=/opt/gh-tracker/backend/.venv/bin/python run.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
