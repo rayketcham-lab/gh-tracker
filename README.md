@@ -164,11 +164,36 @@ running too. If you override `GH_TRACKER_PORT`, update the proxy `target` in
 | `GH_TRACKER_PUBLIC_ONLY` | `false` | Only track public repos |
 | `GH_TRACKER_DB` | `data/metrics.db` | SQLite database path |
 | `GH_TRACKER_PORT` | `50047` | API server port (any valid TCP port) |
-| `GH_TRACKER_RUNNERS_CONFIG` | built-in defaults | Path to a JSON self-hosted runner config |
+| `GH_TRACKER_RUNNERS_CONFIG` | `runners.json` | Path to a JSON self-hosted runner config |
 | `GH_WEBHOOK_SECRET` | unset | Enables HMAC-SHA256 verification on `/api/webhooks/github` |
 
 > When `GH_WEBHOOK_SECRET` is unset, webhook signatures are **not** verified. Set it
 > before exposing `/api/webhooks/github` to anything other than localhost.
+
+### Self-hosted runner config
+
+Runner targets name your own machines, so they are not committed. Drop a
+`runners.json` in the repository root and the runner pane picks it up with no
+further setup — `GH_TRACKER_RUNNERS_CONFIG` only exists to point somewhere else.
+With no file present the pane reports no runners.
+
+```json
+{
+  "pollIntervalMs": 2000,
+  "stuck": { "workerAgeMinutes": 20, "logSilenceSeconds": 90, "lowCpuPercent": 2 },
+  "runners": [
+    { "name": "my-local-runner", "kind": "local",
+      "runnerDir": "/opt/actions-runner",
+      "service": "actions.runner.<org>.<name>.service" },
+    { "name": "my-remote-runner", "kind": "ssh", "sshHost": "buildbox",
+      "runnerDir": "/home/<user>/actions-runner",
+      "service": "actions.runner.<org>.<name>.service" }
+  ]
+}
+```
+
+`name` should match the GitHub-registered runner name exactly. `runners.json` is
+gitignored.
 
 ## Automated Collection
 

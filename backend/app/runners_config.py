@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -87,11 +90,32 @@ def _from_dict(d: dict) -> RunnersConfig:
     )
 
 
+# Checked when GH_TRACKER_RUNNERS_CONFIG is unset, so a native deployment only
+# has to drop the file next to the code — no environment plumbing, no unit-file
+# edit. Gitignored, since its contents are operator-specific.
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "runners.json"
+
+
 def load_config() -> RunnersConfig:
-    path = os.environ.get("GH_TRACKER_RUNNERS_CONFIG")
-    if path and Path(path).is_file():
+    """Load runner targets from the first config file that exists.
+
+    Order: GH_TRACKER_RUNNERS_CONFIG, then <repo>/runners.json. A malformed file
+    is skipped rather than fatal — a broken runner pane must not stop the API
+    from serving analytics.
+    """
+    candidates: list[Path] = []
+
+    env_path = os.environ.get("GH_TRACKER_RUNNERS_CONFIG")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(DEFAULT_CONFIG_PATH)
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
         try:
-            return _from_dict(json.loads(Path(path).read_text()))
-        except Exception:
-            pass
+            return _from_dict(json.loads(candidate.read_text()))
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning("Ignoring unreadable runner config at %s", candidate)
+
     return RunnersConfig(runners=DEFAULT_RUNNERS, rules=StuckRules())
